@@ -8,7 +8,7 @@ import time
 
 
 # -------------------------------------------------------------------
-# 1. Image Captioning with BLIP (direct, no pipeline)
+# 1. Image Captioning
 # -------------------------------------------------------------------
 @st.cache_resource
 def load_blip():
@@ -28,7 +28,7 @@ def img2text(image):
 
 
 # -------------------------------------------------------------------
-# 2. Story Generation with FLAN-T5 (direct, no pipeline)
+# 2. Story Generation (optimised for length)
 # -------------------------------------------------------------------
 @st.cache_resource
 def load_flan():
@@ -38,28 +38,39 @@ def load_flan():
 
 def text2story(caption):
     tokenizer, model = load_flan()
-    prompt = f"Write a short children's story of 50 to 100 words based on this description: {caption}"
+    prompt = (
+        f"Write a short children's story of 50 to 100 words based on this description: {caption}. "
+        f"The story should have a beginning, middle, and end. Use simple words for kids aged 3-10."
+    )
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_length=150,
+            max_length=280,
+            min_length=80,
+            do_sample=True,
+            temperature=0.85,
+            top_p=0.92,
             num_beams=4,
-            early_stopping=True,
+            early_stopping=False,
             no_repeat_ngram_size=2,
+            repetition_penalty=1.15
         )
     story = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    # Post-process: if too short, add a simple continuation
+    if len(story.split()) < 40:
+        story = story + " " + f"The {caption} was very happy. Everyone loved the story. The end."
+    
     return story.strip()
 
 
 # -------------------------------------------------------------------
-# 3. Text-to-Speech (gTTS with retry + fallback to browser speech)
+# 3. Text-to-Speech (gTTS with retry + browser fallback)
 # -------------------------------------------------------------------
 def text2audio_gtss(story_text):
-    """Try gTTS with retries and exponential backoff."""
     max_retries = 3
-    retry_delay = 2  # seconds
-
+    retry_delay = 2
     for attempt in range(max_retries):
         try:
             tts = gTTS(text=story_text, lang="en", slow=False)
@@ -73,16 +84,10 @@ def text2audio_gtss(story_text):
                 retry_delay *= 2
                 continue
             else:
-                # All retries failed
                 raise e
     return None
 
 def text2audio_fallback(story_text):
-    """
-    Return HTML/JavaScript that uses the browser's Web Speech API.
-    This works offline and has no external dependencies.
-    """
-    # Escape single quotes in the story text to avoid breaking JavaScript
     safe_text = story_text.replace("'", "\\'")
     js_code = f"""
         <script>
@@ -97,12 +102,10 @@ def text2audio_fallback(story_text):
     return js_code
 
 def text2audio(story_text):
-    """Main TTS function: try gTTS, fallback to browser speech on failure."""
     try:
         audio_bytes = text2audio_gtss(story_text)
         return audio_bytes, None
-    except Exception as e:
-        # gTTS failed – return fallback JavaScript instead
+    except Exception:
         fallback_html = text2audio_fallback(story_text)
         return None, fallback_html
 
@@ -124,13 +127,11 @@ def main():
         st.image(image, caption="Uploaded Image", use_container_width=True)
 
         if st.button("Generate Story"):
-            # Step 1: caption
             with st.spinner("Looking at the image..."):
                 caption = img2text(image)
                 st.info(f"📷 *What I see:* {caption}")
 
-            # Step 2: story
-            with st.spinner("Writing a story just for you..."):
+            with st.spinner("Writing a story..."):
                 story = text2story(caption)
                 word_count = len(story.split())
                 st.success(f"📖 *Your Story* ({word_count} words):")
@@ -141,27 +142,22 @@ def main():
                 elif word_count > 100:
                     st.info("The story is a bit long. Enjoy the extra magic!")
 
-            # Step 3: audio
-            with st.spinner("Converting story to audio..."):
+            with st.spinner("Preparing audio..."):
                 audio_bytes, fallback_html = text2audio(story)
-
                 if audio_bytes is not None:
                     st.audio(audio_bytes, format="audio/mp3")
                     st.success("🎧 Listen to your story above!")
                 else:
-                    # Use the fallback
-                    st.warning("⚠️ Automatic TTS is temporarily unavailable. Click the button below to hear the story.")
-                    st.components.v1.html(fallback_html, height=0)  # invisible script
-                    # Also provide a manual play button for better UX
+                    st.warning("Auto TTS unavailable – using browser speech.")
+                    st.components.v1.html(fallback_html, height=0)
                     st.markdown(
-                        """
-                        <button onclick="window.speechSynthesis.speak(new SpeechSynthesisUtterance(`{}`))">
-                            🔊 Play Story
+                        f"""
+                        <button onclick="window.speechSynthesis.speak(new SpeechSynthesisUtterance(`{story.replace('`', '\\`')}`))">
+                            🔊 Play Story (Manual)
                         </button>
-                        """.format(story.replace('`', '\\`')),
+                        """,
                         unsafe_allow_html=True
                     )
-
 
 if __name__ == "__main__":
     main()
