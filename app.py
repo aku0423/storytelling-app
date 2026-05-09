@@ -1,15 +1,14 @@
 import streamlit as st
-from transformers import BlipProcessor, BlipForConditionalGeneration, AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
 from PIL import Image
 from gtts import gTTS
 import io
 import torch
 import time
-import random
 
 
 # -------------------------------------------------------------------
-# 1. Image Captioning (BLIP)
+# 1. Image Captioning (BLIP from Hugging Face)
 # -------------------------------------------------------------------
 @st.cache_resource
 def load_blip():
@@ -29,76 +28,76 @@ def img2text(image):
 
 
 # -------------------------------------------------------------------
-# 2. Story Generation (FLAN-T5 with fallback template)
+# 2. Story Generation with GPT-2 (distilgpt2 – small, fast, coherent)
 # -------------------------------------------------------------------
 @st.cache_resource
-def load_flan():
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small")
-    return tokenizer, model
-
-def generate_story_with_flan(caption):
-    """Use FLAN-T5 to generate a story. Returns story string or None if failed."""
-    try:
-        tokenizer, model = load_flan()
-        prompt = (
-            f"Write a very short children's story of 50-70 words based on: '{caption}'. "
-            f"The story must have a clear beginning, middle, and end. "
-            f"Use simple words. Example: 'Once upon a time, ... The end.'"
-        )
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_length=200,
-                min_length=60,
-                do_sample=True,
-                temperature=0.8,
-                top_p=0.9,
-                num_beams=4,
-                repetition_penalty=1.2
-            )
-        story = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Clean up common issues
-        story = story.replace("  ", " ").strip()
-        if len(story.split()) < 30:
-            return None  # fallback
-        return story
-    except Exception:
-        return None
-
-def fallback_story(caption):
-    """Create a simple, coherent story from the caption using templates."""
-    templates = [
-        f"Once upon a time, there was a {caption}. It was a bright and sunny day. "
-        f"The {caption} was very happy and wanted to explore. It met new friends along the way. "
-        f"They played and laughed together. At the end of the day, the {caption} felt grateful. "
-        f"And they all lived happily ever after. The end.",
-        
-        f"One day, a little child saw a {caption}. The child was amazed by its beauty. "
-        f"The {caption} smiled and said, 'Let's be friends!' They went on an adventure in the forest. "
-        f"They found a hidden treasure of sparkling gems. They shared the treasure with everyone. "
-        f"What a wonderful day it was! The end.",
-        
-        f"In a magical land, there lived a {caption}. Every morning, the {caption} would wake up and sing. "
-        f"The birds and butterflies loved the song. One day, a tiny fairy visited the {caption}. "
-        f"The fairy granted a wish: to make everyone smile. The {caption} wished for kindness. "
-        f"From that day on, the land was full of love and joy. The end."
-    ]
-    return random.choice(templates)
+def load_story_generator():
+    """Load a text generation pipeline with GPT-2 (distilled version for speed)."""
+    return pipeline(
+        "text-generation",
+        model="distilgpt2",
+        device=-1  # CPU
+    )
 
 def text2story(caption):
-    """Main story function: try FLAN, fallback to template."""
-    story = generate_story_with_flan(caption)
-    if story is None:
-        story = fallback_story(caption)
+    """
+    Generate a 50-100 word children's story from the image caption using GPT-2.
+    """
+    generator = load_story_generator()
+    
+    # Prompt engineering: prime the model to write a story
+    prompt = f"Once upon a time, there was {caption}. "
+    prompt += "This is a short children's story about what happened next: "
+    
+    # Generate with parameters that discourage repetition
+    output = generator(
+        prompt,
+        max_new_tokens=150,
+        min_new_tokens=60,
+        do_sample=True,
+        temperature=0.85,
+        top_p=0.9,
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=3,
+        eos_token_id=generator.tokenizer.eos_token_id,
+        pad_token_id=generator.tokenizer.eos_token_id,
+        truncation=True
+    )
+    
+    # Extract generated text and remove the prompt part
+    full_text = output[0]['generated_text']
+    story = full_text[len(prompt):].strip()
+    
+    # If the story is too short or empty, fallback to a simple completion
+    if len(story.split()) < 30:
+        # Fallback: use a more deterministic generation
+        story = simple_story_fallback(caption)
+    
     # Ensure length between 50-100 words
     words = story.split()
-    if len(words) < 50:
-        story += " " + fallback_story(caption).split()[-50:]  # append ending from another template
-    elif len(words) > 100:
-        story = " ".join(words[:100]) + " The end."
+    if len(words) > 100:
+        story = ' '.join(words[:100]) + " The end."
+    elif len(words) < 50:
+        story = story + " They were all very happy. And they lived happily ever after. The end."
+    
     return story
+
+def simple_story_fallback(caption):
+    """
+    A very simple deterministic story generator when GPT-2 fails.
+    Still uses the caption, but with a template to guarantee coherence.
+    """
+    templates = [
+        f"{caption} One day, they decided to go on a picnic. They packed sandwiches and juice. "
+        f"The sun was shining, and the birds were singing. They had a wonderful time and returned home "
+        f"with happy hearts. The end.",
+        
+        f"{caption} Everyone in the neighborhood loved them. One morning, a little friend came to visit. "
+        f"They played together all day long. They shared toys and laughed a lot. "
+        f"It was the best day ever. They promised to be friends forever. The end."
+    ]
+    import random
+    return random.choice(templates)
 
 
 # -------------------------------------------------------------------
@@ -153,7 +152,7 @@ def main():
     st.set_page_config(page_title="Storytelling App for Kids", page_icon="📖")
     st.title("✨ Storytelling App ✨")
     st.markdown(
-        "Upload an image, and I will create a magical children's story (50–100 words) and read it aloud!"
+        "Upload an image. I will use AI to describe it and then write a magical children's story (50–100 words) and read it aloud!"
     )
 
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
@@ -167,7 +166,7 @@ def main():
                 caption = img2text(image)
                 st.info(f"📷 *What I see:* {caption}")
 
-            with st.spinner("Writing a story..."):
+            with st.spinner("Writing a story using AI text generation..."):
                 story = text2story(caption)
                 word_count = len(story.split())
                 st.success(f"📖 *Your Story* ({word_count} words):")
@@ -184,7 +183,7 @@ def main():
                     st.audio(audio_bytes, format="audio/mp3")
                     st.success("🎧 Listen to your story above!")
                 else:
-                    st.warning("Auto TTS unavailable – using browser speech.")
+                    st.warning("Auto TTS temporarily unavailable. Using browser speech.")
                     st.components.v1.html(fallback_html, height=0)
                     st.markdown(
                         f"""
