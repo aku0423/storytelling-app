@@ -8,7 +8,7 @@ import time
 
 
 # -------------------------------------------------------------------
-# 1. Image Captioning
+# 1. Image Captioning (BLIP)
 # -------------------------------------------------------------------
 @st.cache_resource
 def load_blip():
@@ -28,39 +28,35 @@ def img2text(image):
 
 
 # -------------------------------------------------------------------
-# 2. Story Generation (optimised for length)
+# 2. Story Generation (fine-tuned T5 for stories)
 # -------------------------------------------------------------------
 @st.cache_resource
-def load_flan():
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small")
+def load_story_model():
+    tokenizer = AutoTokenizer.from_pretrained("mrm8488/t5-base-finetuned-story-generation")
+    model = AutoModelForSeq2SeqLM.from_pretrained("mrm8488/t5-base-finetuned-story-generation")
     return tokenizer, model
 
 def text2story(caption):
-    tokenizer, model = load_flan()
-    prompt = (
-        f"Write a short children's story of 50 to 100 words based on this description: {caption}. "
-        f"The story should have a beginning, middle, and end. Use simple words for kids aged 3-10."
-    )
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+    tokenizer, model = load_story_model()
+    # The model expects a prompt like "Generate a story: <topic>"
+    prompt = f"Generate a short children's story based on: {caption}"
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_length=280,
-            min_length=80,
+            max_length=200,
+            min_length=60,
+            temperature=0.7,
             do_sample=True,
-            temperature=0.85,
-            top_p=0.92,
+            repetition_penalty=1.1,
             num_beams=4,
-            early_stopping=False,
-            no_repeat_ngram_size=2,
-            repetition_penalty=1.15
+            early_stopping=True
         )
     story = tokenizer.decode(outputs[0], skip_special_tokens=True)
     
-    # Post-process: if too short, add a simple continuation
-    if len(story.split()) < 40:
-        story = story + " " + f"The {caption} was very happy. Everyone loved the story. The end."
+    # Ensure minimum length (if model gives very short output, append a gentle ending)
+    if len(story.split()) < 30:
+        story = story + " " + f"They all lived happily ever after. The end."
     
     return story.strip()
 
@@ -78,13 +74,13 @@ def text2audio_gtss(story_text):
             tts.write_to_fp(audio_bytes)
             audio_bytes.seek(0)
             return audio_bytes
-        except Exception as e:
+        except Exception:
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
                 retry_delay *= 2
                 continue
             else:
-                raise e
+                raise
     return None
 
 def text2audio_fallback(story_text):
@@ -117,7 +113,7 @@ def main():
     st.set_page_config(page_title="Storytelling App for Kids", page_icon="📖")
     st.title("✨ Storytelling App ✨")
     st.markdown(
-        "Upload an image, and I will create a magical 50–100 word children's story and read it aloud!"
+        "Upload an image, and I will create a magical children's story (50–100 words) and read it aloud!"
     )
 
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
