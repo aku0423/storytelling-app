@@ -1,9 +1,9 @@
 """
 Storytelling Application for Kids
---------------------------------
+---------------------------------
 - Upload an image -> automatic caption -> generate a 50-100 word children's story -> text-to-speech audio.
-- Uses Hugging Face models and gTTS.
-- Designed for Streamlit Cloud deployment; secrets can store HF_TOKEN if needed.
+- Uses Hugging Face models (BLIP for captioning, FLAN-T5 for story generation) and gTTS for audio.
+- Designed for Streamlit Cloud deployment.
 """
 
 import streamlit as st
@@ -13,37 +13,35 @@ from gtts import gTTS
 import io
 
 
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 # 1. Model loading (cached to avoid reloading on every interaction)
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 @st.cache_resource
 def load_caption_model():
-    """Load BLIP image-to-text model."""
-    return pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
+    """
+    Load the BLIP image captioning model.
+    We do NOT specify a task string to avoid compatibility issues across versions.
+    The pipeline will infer the correct task from the model name.
+    """
+    return pipeline(model="Salesforce/blip-image-captioning-base")
 
 
 @st.cache_resource
 def load_story_model():
     """
     Load FLAN-T5-small for instruction-based story generation.
-    If a Hugging Face token is stored in secrets, it can be passed
-    (though this model is public and does not require a token).
+    This model is public, so no token is required.
     """
-    token = None
-    if "HF_TOKEN" in st.secrets:
-        token = st.secrets["HF_TOKEN"]
-    # device=-1 forces CPU; Streamlit Cloud free tier has no GPU.
     return pipeline(
         "text2text-generation",
         model="google/flan-t5-small",
-        device=-1,
-        use_auth_token=token
+        device=-1  # Force CPU (Streamlit Cloud free tier has no GPU)
     )
 
 
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 # 2. Core functions (as required by the skeleton)
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 def img2text(image):
     """
     Convert a PIL image to a text caption.
@@ -53,6 +51,7 @@ def img2text(image):
         str: Generated caption.
     """
     caption_pipeline = load_caption_model()
+    # The pipeline returns a list of dicts: [{'generated_text': '...'}]
     result = caption_pipeline(image)
     caption = result[0]["generated_text"]
     return caption
@@ -91,9 +90,9 @@ def text2audio(story_text):
     return audio_bytes
 
 
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 # 3. Streamlit UI
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Storytelling App for Kids", page_icon="📖")
     st.title("✨ Storytelling App ✨")
