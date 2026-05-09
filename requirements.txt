@@ -3,4 +3,3 @@ transformers>=4.30.0
 torch>=2.0.0
 pillow>=9.0.0
 gTTS>=2.3.0
-sentencepiece
