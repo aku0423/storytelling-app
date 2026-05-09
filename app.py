@@ -1,15 +1,14 @@
 import streamlit as st
-from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
+from transformers import BlipProcessor, BlipForConditionalGeneration, AutoTokenizer, AutoModelForSeq2SeqLM
 from PIL import Image
 from gtts import gTTS
 import io
 import torch
 import time
-import re
 
 
 # -------------------------------------------------------------------
-# 1. Image Captioning (BLIP from Hugging Face)
+# 1. Image Captioning (BLIP)
 # -------------------------------------------------------------------
 @st.cache_resource
 def load_blip():
@@ -29,99 +28,61 @@ def img2text(image):
 
 
 # -------------------------------------------------------------------
-# 2. Story Generation with GPT-2 – No Templates
+# 2. Story Generation with FLAN-T5-Large (No Templates)
 # -------------------------------------------------------------------
 @st.cache_resource
-def load_gpt2():
-    """Load GPT-2 text generation pipeline."""
-    return pipeline(
-        "text-generation",
-        model="gpt2",
-        device=-1  # CPU
-    )
-
-def remove_repetitive_cycles(text):
-    """Remove repetitive n-gram cycles (e.g., 'dog ran. dog ran. dog ran.') algorithmically."""
-    words = text.split()
-    if len(words) < 10:
-        return text
-    # Look for repeating 3-gram cycles
-    for n in range(3, 7):
-        seen = {}
-        for i in range(len(words) - n):
-            gram = tuple(words[i:i+n])
-            if gram in seen:
-                cycle_start = seen[gram]
-                cycle_end = i
-                # If the cycle repeats more than twice, cut after first occurrence
-                if (cycle_end - cycle_start) > 0 and (cycle_end + (cycle_end - cycle_start)) < len(words):
-                    if words[cycle_start:cycle_end] == words[cycle_end:cycle_end + (cycle_end - cycle_start)]:
-                        words = words[:cycle_end]
-                        break
-        else:
-            continue
-        break
-    return ' '.join(words)
-
-def generate_story(caption, generator, temperature=0.7, repetition_penalty=1.2):
-    """Generate a story using GPT-2 with no hardcoded templates."""
-    prompt = f"Once upon a time, {caption}. "
-    output = generator(
-        prompt,
-        max_new_tokens=130,
-        min_new_tokens=50,
-        do_sample=True,
-        temperature=temperature,
-        top_p=0.9,
-        repetition_penalty=repetition_penalty,
-        no_repeat_ngram_size=3,
-        truncation=True,
-        pad_token_id=50256
-    )
-    full_text = output[0]['generated_text']
-    # Remove the prompt
-    story = full_text[len(prompt):].strip()
-    # Basic cleanup: remove leading nonsense
-    story = re.sub(r'^[^a-zA-Z]+', '', story)
-    # Remove repetitive cycles
-    story = remove_repetitive_cycles(story)
-    # Ensure it ends with a sentence terminator
-    if story and story[-1] not in '.!?':
-        story += '.'
-    return story
+def load_flan_large():
+    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
+    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large")
+    return tokenizer, model
 
 def text2story(caption):
-    """Main story function: pure model generation with fallback retries (still model-only)."""
-    generator = load_gpt2()
+    """Generate a story using FLAN-T5-Large without any template fallback."""
+    tokenizer, model = load_flan_large()
     
-    # First attempt
-    story = generate_story(caption, generator, temperature=0.7, repetition_penalty=1.2)
-    word_count = len(story.split())
+    # Instruction that forces a story output
+    prompt = (
+        f"Generate a children's story of 50-100 words based on this image description: '{caption}'. "
+        f"The story must have a beginning, middle, and end. Use simple language. Start with 'Once upon a time'."
+    )
     
-    # If too short (<30 words) or seems repetitive, try again with lower temperature
-    if word_count < 30 or len(set(story.split())) < word_count * 0.6:
-        story = generate_story(caption, generator, temperature=0.6, repetition_penalty=1.3)
-        word_count = len(story.split())
-    
-    # If still too short, try once more with a different prompt variation (still no template)
-    if word_count < 30:
-        prompt2 = f"{caption} One day, "
-        output = generator(
-            prompt2,
-            max_new_tokens=100,
-            min_new_tokens=40,
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            min_new_tokens=60,
             do_sample=True,
-            temperature=0.65,
-            repetition_penalty=1.25,
-            no_repeat_ngram_size=3
+            temperature=0.8,
+            top_p=0.95,
+            repetition_penalty=1.1,
+            no_repeat_ngram_size=3,
+            num_beams=4,
+            early_stopping=True
         )
-        story = output[0]['generated_text'][len(prompt2):].strip()
-        story = remove_repetitive_cycles(story)
-        if story and story[-1] not in '.!?':
-            story += '.'
-        word_count = len(story.split())
     
-    # Final length adjustment (only trimming, no template addition)
+    story = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    # Basic cleanup: remove any repetition of the prompt
+    if story.startswith(prompt):
+        story = story[len(prompt):]
+    story = story.strip()
+    
+    # No template fallback – if empty, we return an error message (model-only)
+    if len(story.split()) < 20:
+        # Retry with different temperature
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=120,
+            temperature=0.6,
+            repetition_penalty=1.2,
+            do_sample=True
+        )
+        story = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if len(story.split()) < 20:
+            story = "[Model failed to generate a story. Please try again with a different image.]"
+    
+    # Ensure length between 50-100 (trim only, no addition)
     words = story.split()
     if len(words) > 100:
         story = ' '.join(words[:100])
@@ -132,7 +93,7 @@ def text2story(caption):
 
 
 # -------------------------------------------------------------------
-# 3. Text-to-Speech (gTTS with retry + browser fallback)
+# 3. Text-to-Speech
 # -------------------------------------------------------------------
 def text2audio_gtss(story_text):
     max_retries = 3
@@ -183,7 +144,8 @@ def main():
     st.set_page_config(page_title="Storytelling App for Kids", page_icon="📖")
     st.title("✨ Storytelling App ✨")
     st.markdown(
-        "Upload an image. AI describes it, then **writes an original story** (50–100 words) using GPT-2. No pre‑written templates – every story is generated fresh."
+        "Upload an image. AI describes it, then **generates an original children's story** using FLAN-T5-Large. "
+        "No pre-written text – every story is created on the fly."
     )
 
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
@@ -197,16 +159,16 @@ def main():
                 caption = img2text(image)
                 st.info(f"📷 *What I see:* {caption}")
 
-            with st.spinner("📝 AI is writing a story (this may take 10-15 seconds)..."):
+            with st.spinner("📝 AI is writing a story (may take 20-30 seconds on first run)..."):
                 story = text2story(caption)
                 word_count = len(story.split())
                 st.success(f"📖 *Your Story* ({word_count} words):")
                 st.write(story)
 
                 if word_count < 50:
-                    st.warning("The story is a bit short – the AI generated a concise tale.")
+                    st.warning("The story is a bit short – the AI kept it concise.")
                 elif word_count > 100:
-                    st.info("A longer story – enjoy the extra magic!")
+                    st.info("A longer story – more fun for everyone!")
 
             with st.spinner("🔊 Converting story to audio..."):
                 audio_bytes, fallback_html = text2audio(story)
@@ -214,12 +176,12 @@ def main():
                     st.audio(audio_bytes, format="audio/mp3")
                     st.success("🎧 Listen to your story above!")
                 else:
-                    st.warning("⚠️ Auto TTS unavailable – using your browser's voice instead.")
+                    st.warning("⚠️ Auto TTS unavailable – using browser voice.")
                     st.components.v1.html(fallback_html, height=0)
                     st.markdown(
                         f"""
                         <button onclick="window.speechSynthesis.speak(new SpeechSynthesisUtterance(`{story.replace('`', '\\`')}`))">
-                            🔊 Click to Play Story
+                            🔊 Play Story
                         </button>
                         """,
                         unsafe_allow_html=True
